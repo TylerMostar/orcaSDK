@@ -180,14 +180,14 @@ void run_motor_worker(MotorConfig motor_config, int baud_rate, int interframe_de
         if (!connected) {
             auto open_error = actuator.open_serial_port(motor_config.device, baud_rate, interframe_delay_us);
             if (open_error) {
-                log_line("[WARN] " + label + " open failed: " + open_error.message + " ; retrying in 2s");
+                log_line("[WARN] " + label + " open failed: " + open_error.what() + " ; retrying in 2s");
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
             }
 
             auto config_error = configure_motor(actuator, damping);
             if (config_error) {
-                log_line("[WARN] " + label + " configure failed: " + config_error.message + " ; retrying in 2s");
+                log_line("[WARN] " + label + " configure failed: " + config_error.what() + " ; retrying in 2s");
                 actuator.close_serial_port();
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
@@ -206,7 +206,7 @@ void run_motor_worker(MotorConfig motor_config, int baud_rate, int interframe_de
 
             const auto mode = actuator.get_mode();
             if (mode.error) {
-                log_line("[WARN] " + label + " communication health-check failed: " + mode.error.message + " ; reconnecting");
+                log_line("[WARN] " + label + " communication health-check failed: " + mode.error.what() + " ; reconnecting");
                 actuator.close_serial_port();
                 connected = false;
                 std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -217,7 +217,7 @@ void run_motor_worker(MotorConfig motor_config, int baud_rate, int interframe_de
                 log_line("[WARN] " + label + " not in HapticMode anymore; reconfiguring");
                 auto config_error = configure_motor(actuator, damping);
                 if (config_error) {
-                    log_line("[WARN] " + label + " reconfigure failed: " + config_error.message + " ; reconnecting");
+                    log_line("[WARN] " + label + " reconfigure failed: " + config_error.what() + " ; reconnecting");
                     actuator.close_serial_port();
                     connected = false;
                     std::this_thread::sleep_for(std::chrono::seconds(1));
