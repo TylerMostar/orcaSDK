@@ -1,0 +1,16 @@
+[Unit]
+Description=ORCA multi-actuator haptics daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=dialout
+WorkingDirectory=/opt/orca-haptics
+ExecStart=/opt/orca-haptics/bin/orca_haptics_daemon --device /dev/orca_front --device /dev/orca_rear --damping 600
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
