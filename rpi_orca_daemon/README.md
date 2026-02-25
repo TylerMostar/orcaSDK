@@ -33,8 +33,8 @@ build/rpi_orca_daemon/orca_haptics_daemon
 ```
 
 ### Optional arguments
-- `--baud <int>` (default `115200`)
-- `--interframe-us <int>` (default `250`)
+- `--baud <int>` (default `19200`)
+- `--interframe-us <int>` (default `2000`)
 - `--address <int>` global Modbus address for all devices (default `1`)
 - `--device-address /dev/orca_name:addr` set per-device address
 

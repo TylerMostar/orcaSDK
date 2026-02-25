@@ -26,8 +26,8 @@ struct MotorConfig {
 
 struct AppConfig {
     std::vector<MotorConfig> motors;
-    int baud_rate = 115200;
-    int interframe_delay_us = 250;
+    int baud_rate = orcaSDK::Constants::kDefaultBaudRate;
+    int interframe_delay_us = orcaSDK::Constants::kDefaultInterframeDelay_uS;
     uint16_t damping = 600;
 };
 
@@ -46,8 +46,8 @@ void print_usage(const char* exe_name)
         << "Required:\n"
         << "  --device <path>                 Linux device node (e.g., /dev/orca_front)\n\n"
         << "Options:\n"
-        << "  --baud <int>                    Default: 115200\n"
-        << "  --interframe-us <int>           Default: 250\n"
+        << "  --baud <int>                    Default: 19200\n"
+        << "  --interframe-us <int>           Default: 2000\n"
         << "  --damping <int>                 Default: 600\n"
         << "  --address <int>                 Apply one Modbus address to all devices (default: 1)\n"
         << "  --device-address <path:addr>    Per-device Modbus address override\n"
