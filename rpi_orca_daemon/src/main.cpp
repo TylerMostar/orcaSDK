@@ -222,13 +222,19 @@ void run_motor_worker(
     int health_check_ms)
 {
     const std::string label = motor_config.device + " (addr=" + std::to_string(motor_config.modbus_address) + ")";
+    constexpr int kRetryLogIntervalMs = 2000;
+
     orcaSDK::Actuator actuator(label.c_str(), motor_config.modbus_address);
 
     bool port_open = false;
     bool haptics_configured = false;
+    bool waiting_for_port_logged = false;
+    bool waiting_for_haptics_logged = false;
     auto next_open_attempt = std::chrono::steady_clock::now();
     auto next_config_attempt = std::chrono::steady_clock::now();
     auto next_health_check = std::chrono::steady_clock::now();
+    auto next_open_retry_log = std::chrono::steady_clock::now();
+    auto next_config_retry_log = std::chrono::steady_clock::now();
 
     while (g_should_run.load()) {
         const auto now = std::chrono::steady_clock::now();
@@ -237,30 +243,51 @@ void run_motor_worker(
             next_open_attempt = now + std::chrono::milliseconds(open_retry_ms);
             auto open_error = actuator.open_serial_port(motor_config.device, baud_rate, interframe_delay_us);
             if (open_error) {
+                if (!waiting_for_port_logged || now >= next_open_retry_log) {
+                    log_line("[WARN] " + label + " disconnected; retrying serial open every " + std::to_string(open_retry_ms) + "ms. Last error: " + open_error.what());
+                    next_open_retry_log = now + std::chrono::milliseconds(kRetryLogIntervalMs);
+                    waiting_for_port_logged = true;
+                }
                 continue;
             }
 
             port_open = true;
             haptics_configured = false;
             next_config_attempt = now;
-            log_line("[INFO] Port opened for " + label);
+            waiting_for_haptics_logged = false;
+
+            if (waiting_for_port_logged) {
+                log_line("[INFO] Serial connection restored for " + label);
+            }
+            else {
+                log_line("[INFO] Port opened for " + label);
+            }
+            waiting_for_port_logged = false;
         }
 
         if (port_open && !haptics_configured && now >= next_config_attempt) {
             next_config_attempt = now + std::chrono::milliseconds(configure_retry_ms);
             auto config_error = configure_motor(actuator, damping);
             if (config_error) {
+                if (!waiting_for_haptics_logged || now >= next_config_retry_log) {
+                    log_line("[WARN] " + label + " connected but not configured; retrying haptics every " + std::to_string(configure_retry_ms) + "ms. Last error: " + config_error.what());
+                    next_config_retry_log = now + std::chrono::milliseconds(kRetryLogIntervalMs);
+                    waiting_for_haptics_logged = true;
+                }
+
                 if (should_reopen_port(config_error)) {
                     actuator.close_serial_port();
                     port_open = false;
                     haptics_configured = false;
                     next_open_attempt = now + std::chrono::milliseconds(open_retry_ms);
+                    waiting_for_port_logged = false;
                 }
                 continue;
             }
 
             haptics_configured = true;
             next_health_check = now + std::chrono::milliseconds(health_check_ms);
+            waiting_for_haptics_logged = false;
             log_line("[INFO] Configured " + label + " in haptics mode with damping=" + std::to_string(damping));
         }
 
@@ -273,11 +300,16 @@ void run_motor_worker(
 
             const auto mode = actuator.get_mode();
             if (mode.error) {
+                log_line("[WARN] " + label + " lost communication while running; switching to retry mode. Error: " + mode.error.what());
                 haptics_configured = false;
+                waiting_for_haptics_logged = false;
+                next_config_attempt = now;
+
                 if (should_reopen_port(mode.error)) {
                     actuator.close_serial_port();
                     port_open = false;
                     next_open_attempt = now + std::chrono::milliseconds(open_retry_ms);
+                    waiting_for_port_logged = false;
                 }
                 continue;
             }
