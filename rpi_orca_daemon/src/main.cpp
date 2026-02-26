@@ -3,9 +3,11 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cctype>
 #include <cstdint>
 #include <iostream>
 #include <sstream>
+#include <algorithm>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,6 +31,9 @@ struct AppConfig {
     int baud_rate = orcaSDK::Constants::kDefaultBaudRate;
     int interframe_delay_us = orcaSDK::Constants::kDefaultInterframeDelay_uS;
     uint16_t damping = 600;
+    int open_retry_ms = 200;
+    int configure_retry_ms = 100;
+    int health_check_ms = 500;
 };
 
 constexpr uint16_t kDamperEffectBit = (1u << 4);
@@ -49,9 +54,28 @@ void print_usage(const char* exe_name)
         << "  --baud <int>                    Default: 19200\n"
         << "  --interframe-us <int>           Default: 2000\n"
         << "  --damping <int>                 Default: 600\n"
+        << "  --open-retry-ms <int>           Default: 200\n"
+        << "  --configure-retry-ms <int>      Default: 100\n"
+        << "  --health-check-ms <int>         Default: 500\n"
         << "  --address <int>                 Apply one Modbus address to all devices (default: 1)\n"
         << "  --device-address <path:addr>    Per-device Modbus address override\n"
         << std::endl;
+}
+
+std::string lowercase(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool should_reopen_port(const orcaSDK::OrcaError& error)
+{
+    const std::string msg = lowercase(error.what());
+    return msg.find("no opened serial port") != std::string::npos
+        || msg.find("serial port not open") != std::string::npos
+        || msg.find("permission") != std::string::npos
+        || msg.find("no such file") != std::string::npos;
 }
 
 bool parse_path_address(const std::string& input, MotorConfig& config)
@@ -112,6 +136,21 @@ bool parse_args(int argc, char** argv, AppConfig& config)
             if (!value) return false;
             config.damping = static_cast<uint16_t>(std::stoi(value));
         }
+        else if (arg == "--open-retry-ms") {
+            const char* value = require_next("--open-retry-ms");
+            if (!value) return false;
+            config.open_retry_ms = std::stoi(value);
+        }
+        else if (arg == "--configure-retry-ms") {
+            const char* value = require_next("--configure-retry-ms");
+            if (!value) return false;
+            config.configure_retry_ms = std::stoi(value);
+        }
+        else if (arg == "--health-check-ms") {
+            const char* value = require_next("--health-check-ms");
+            if (!value) return false;
+            config.health_check_ms = std::stoi(value);
+        }
         else if (arg == "--address") {
             const char* value = require_next("--address");
             if (!value) return false;
@@ -148,6 +187,11 @@ bool parse_args(int argc, char** argv, AppConfig& config)
         return false;
     }
 
+    if (config.open_retry_ms < 10 || config.configure_retry_ms < 10 || config.health_check_ms < 50) {
+        std::cerr << "Retry/check intervals too small. Use --open-retry-ms >=10, --configure-retry-ms >=10, --health-check-ms >=50." << std::endl;
+        return false;
+    }
+
     return true;
 }
 
@@ -168,61 +212,79 @@ orcaSDK::OrcaError configure_motor(orcaSDK::Actuator& actuator, uint16_t damping
     return {false, ""};
 }
 
-void run_motor_worker(MotorConfig motor_config, int baud_rate, int interframe_delay_us, uint16_t damping)
+void run_motor_worker(
+    MotorConfig motor_config,
+    int baud_rate,
+    int interframe_delay_us,
+    uint16_t damping,
+    int open_retry_ms,
+    int configure_retry_ms,
+    int health_check_ms)
 {
     const std::string label = motor_config.device + " (addr=" + std::to_string(motor_config.modbus_address) + ")";
     orcaSDK::Actuator actuator(label.c_str(), motor_config.modbus_address);
 
-    bool connected = false;
+    bool port_open = false;
+    bool haptics_configured = false;
+    auto next_open_attempt = std::chrono::steady_clock::now();
+    auto next_config_attempt = std::chrono::steady_clock::now();
     auto next_health_check = std::chrono::steady_clock::now();
 
     while (g_should_run.load()) {
-        if (!connected) {
+        const auto now = std::chrono::steady_clock::now();
+
+        if (!port_open && now >= next_open_attempt) {
+            next_open_attempt = now + std::chrono::milliseconds(open_retry_ms);
             auto open_error = actuator.open_serial_port(motor_config.device, baud_rate, interframe_delay_us);
             if (open_error) {
-                log_line("[WARN] " + label + " open failed: " + open_error.what() + " ; retrying in 2s");
-                std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
             }
 
-            auto config_error = configure_motor(actuator, damping);
-            if (config_error) {
-                log_line("[WARN] " + label + " configure failed: " + config_error.what() + " ; retrying in 2s");
-                actuator.close_serial_port();
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-                continue;
-            }
-
-            connected = true;
-            log_line("[INFO] Connected and configured " + label + " in haptics mode with damping=" + std::to_string(damping));
-            next_health_check = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            port_open = true;
+            haptics_configured = false;
+            next_config_attempt = now;
+            log_line("[INFO] Port opened for " + label);
         }
 
-        actuator.run();
+        if (port_open && !haptics_configured && now >= next_config_attempt) {
+            next_config_attempt = now + std::chrono::milliseconds(configure_retry_ms);
+            auto config_error = configure_motor(actuator, damping);
+            if (config_error) {
+                if (should_reopen_port(config_error)) {
+                    actuator.close_serial_port();
+                    port_open = false;
+                    haptics_configured = false;
+                    next_open_attempt = now + std::chrono::milliseconds(open_retry_ms);
+                }
+                continue;
+            }
 
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= next_health_check) {
-            next_health_check = now + std::chrono::seconds(2);
+            haptics_configured = true;
+            next_health_check = now + std::chrono::milliseconds(health_check_ms);
+            log_line("[INFO] Configured " + label + " in haptics mode with damping=" + std::to_string(damping));
+        }
+
+        if (port_open) {
+            actuator.run();
+        }
+
+        if (port_open && haptics_configured && now >= next_health_check) {
+            next_health_check = now + std::chrono::milliseconds(health_check_ms);
 
             const auto mode = actuator.get_mode();
             if (mode.error) {
-                log_line("[WARN] " + label + " communication health-check failed: " + mode.error.what() + " ; reconnecting");
-                actuator.close_serial_port();
-                connected = false;
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                haptics_configured = false;
+                if (should_reopen_port(mode.error)) {
+                    actuator.close_serial_port();
+                    port_open = false;
+                    next_open_attempt = now + std::chrono::milliseconds(open_retry_ms);
+                }
                 continue;
             }
 
             if (mode.value != orcaSDK::HapticMode) {
-                log_line("[WARN] " + label + " not in HapticMode anymore; reconfiguring");
-                auto config_error = configure_motor(actuator, damping);
-                if (config_error) {
-                    log_line("[WARN] " + label + " reconfigure failed: " + config_error.what() + " ; reconnecting");
-                    actuator.close_serial_port();
-                    connected = false;
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                    continue;
-                }
+                haptics_configured = false;
+                next_config_attempt = now;
             }
         }
 
@@ -253,7 +315,15 @@ int main(int argc, char** argv)
     workers.reserve(config.motors.size());
 
     for (const auto& motor : config.motors) {
-        workers.emplace_back(run_motor_worker, motor, config.baud_rate, config.interframe_delay_us, config.damping);
+        workers.emplace_back(
+            run_motor_worker,
+            motor,
+            config.baud_rate,
+            config.interframe_delay_us,
+            config.damping,
+            config.open_retry_ms,
+            config.configure_retry_ms,
+            config.health_check_ms);
     }
 
     for (auto& worker : workers) {

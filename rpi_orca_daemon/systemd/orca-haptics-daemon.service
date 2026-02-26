@@ -8,7 +8,7 @@ Type=simple
 User=pi
 Group=dialout
 WorkingDirectory=/opt/orca-haptics
-ExecStart=/opt/orca-haptics/bin/orca_haptics_daemon --device /dev/orca_front --device /dev/orca_rear --baud 19200 --interframe-us 2000 --damping 600
+ExecStart=/opt/orca-haptics/bin/orca_haptics_daemon --device /dev/orca_front --device /dev/orca_rear --baud 19200 --interframe-us 2000 --damping 600 --open-retry-ms 50 --configure-retry-ms 20 --health-check-ms 100
 Restart=always
 RestartSec=2
 

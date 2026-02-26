@@ -37,6 +37,15 @@ build/rpi_orca_daemon/orca_haptics_daemon
 - `--interframe-us <int>` (default `2000`)
 - `--address <int>` global Modbus address for all devices (default `1`)
 - `--device-address /dev/orca_name:addr` set per-device address
+- `--open-retry-ms <int>` retry interval when port is not open (default `200`)
+- `--configure-retry-ms <int>` retry interval for haptics configuration while waiting for motor electronics (default `100`)
+- `--health-check-ms <int>` mode/communication health check interval after configured (default `500`)
+
+### Fast-engagement profile (recommended for your power-up use case)
+
+```bash
+./build/rpi_orca_daemon/orca_haptics_daemon --device /dev/orca_front --damping 600 --baud 19200 --interframe-us 2000 --open-retry-ms 50 --configure-retry-ms 20 --health-check-ms 100
+```
 
 ## Run persistently with systemd
 A service file template is provided at:
