@@ -7,8 +7,8 @@ Wants=network-online.target
 Type=simple
 User=pi
 Group=dialout
-WorkingDirectory=/opt/orca-haptics
-ExecStart=/opt/orca-haptics/bin/orca_haptics_daemon --device /dev/orca_front --device /dev/orca_rear --baud 19200 --interframe-us 2000 --damping 600 --open-retry-ms 50 --configure-retry-ms 20 --health-check-ms 100
+WorkingDirectory=/home/pi/Desktop/OrcaSDK_Daemon_repo/orcaSDK
+ExecStart=/home/pi/Desktop/OrcaSDK_Daemon_repo/orcaSDK/build/rpi_orca_daemon/orca_haptics_daemon --device /dev/rs232_to_usb_converter_1 --damping 600 --baud 19200 --interframe-us 2000 --open-retry-ms 50 --configure-retry-ms 20 --health-check-ms 100
 Restart=always
 RestartSec=2
 

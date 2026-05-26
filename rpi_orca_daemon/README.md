@@ -4,7 +4,7 @@ This app keeps one or more ORCA actuators in **Haptic mode** with **damping = 60
 It is intended to run persistently on a Raspberry Pi 5.
 
 ## What it does
-- Connects to each serial device you provide (recommended: stable udev names like `/dev/orca_front`)
+- Connects to each serial device you provide (recommended: stable udev names like `/dev/rs232_to_usb_converter_1`)
 - Configures each actuator with:
   - `set_damper(600)`
   - `enable_haptic_effects(Damper)`
@@ -29,7 +29,7 @@ build/rpi_orca_daemon/orca_haptics_daemon
 ## Run manually
 
 ```bash
-./build/rpi_orca_daemon/orca_haptics_daemon --device /dev/orca_front --device /dev/orca_rear --damping 600
+./build/rpi_orca_daemon/orca_haptics_daemon --device /dev/rs232_to_usb_converter_1 --device /dev/orca_rear --damping 600
 ```
 
 ### Optional arguments
@@ -44,7 +44,7 @@ build/rpi_orca_daemon/orca_haptics_daemon
 ### Fast-engagement profile (recommended for your power-up use case)
 
 ```bash
-./build/rpi_orca_daemon/orca_haptics_daemon --device /dev/orca_front --damping 600 --baud 19200 --interframe-us 2000 --open-retry-ms 50 --configure-retry-ms 20 --health-check-ms 100
+./build/rpi_orca_daemon/orca_haptics_daemon --device /dev/rs232_to_usb_converter_1 --damping 600 --baud 19200 --interframe-us 2000 --open-retry-ms 50 --configure-retry-ms 20 --health-check-ms 100
 ```
 
 ## Run persistently with systemd
