@@ -1,3 +1,5 @@
+//copyright (c) 2026 Mostar Labs Inc. All rights reserved.
+
 #include "actuator.h"
 
 #include <atomic>
@@ -34,9 +36,26 @@ struct AppConfig {
     int open_retry_ms = 200;
     int configure_retry_ms = 100;
     int health_check_ms = 500;
+    std::string serial_log_dir;
 };
 
 constexpr uint16_t kDamperEffectBit = (1u << 4);
+
+enum class MotorRunState {
+    WaitingForSerial,
+    WaitingForHaptics,
+    HapticsActive
+};
+
+const char* motor_state_to_string(MotorRunState state)
+{
+    switch (state) {
+    case MotorRunState::WaitingForSerial: return "WAITING_FOR_SERIAL";
+    case MotorRunState::WaitingForHaptics: return "WAITING_FOR_HAPTICS";
+    case MotorRunState::HapticsActive: return "HAPTICS_ACTIVE";
+    default: return "UNKNOWN";
+    }
+}
 
 void log_line(const std::string& message)
 {
@@ -49,7 +68,7 @@ void print_usage(const char* exe_name)
         << "Usage:\n"
         << "  " << exe_name << " --device <path> [--device <path> ...] [options]\n\n"
         << "Required:\n"
-        << "  --device <path>                 Linux device node (e.g., /dev/orca_front)\n\n"
+        << "  --device <path>                 Linux device node (e.g., /dev/rs232_to_usb_converter_1)\n\n"
         << "Options:\n"
         << "  --baud <int>                    Default: 19200\n"
         << "  --interframe-us <int>           Default: 2000\n"
@@ -59,6 +78,7 @@ void print_usage(const char* exe_name)
         << "  --health-check-ms <int>         Default: 500\n"
         << "  --address <int>                 Apply one Modbus address to all devices (default: 1)\n"
         << "  --device-address <path:addr>    Per-device Modbus address override\n"
+        << "  --serial-log-dir <path>         Optional raw Modbus tx/rx log directory\n"
         << std::endl;
 }
 
@@ -99,6 +119,45 @@ bool parse_path_address(const std::string& input, MotorConfig& config)
     }
 
     return true;
+}
+
+std::string sanitize_log_component(std::string value)
+{
+    for (char& c : value) {
+        const auto uc = static_cast<unsigned char>(c);
+        if (!std::isalnum(uc) && c != '-' && c != '_') {
+            c = '-';
+        }
+    }
+    return value;
+}
+
+std::string make_serial_log_path(const std::string& serial_log_dir, const MotorConfig& motor_config)
+{
+    if (serial_log_dir.empty()) {
+        return "";
+    }
+
+    std::string dir = serial_log_dir;
+    const char last = dir.back();
+    if (last != '/' && last != '\\') {
+        dir += '/';
+    }
+
+    return dir
+        + sanitize_log_component(motor_config.device)
+        + "-addr-"
+        + std::to_string(motor_config.modbus_address)
+        + ".tsv";
+}
+
+orcaSDK::OrcaError add_config_step_context(const char* step, const orcaSDK::OrcaError& error)
+{
+    if (!error) {
+        return {false, ""};
+    }
+
+    return {true, std::string(step) + " failed: " + error.what()};
 }
 
 bool parse_args(int argc, char** argv, AppConfig& config)
@@ -173,6 +232,11 @@ bool parse_args(int argc, char** argv, AppConfig& config)
             }
             config.motors.push_back(cfg);
         }
+        else if (arg == "--serial-log-dir") {
+            const char* value = require_next("--serial-log-dir");
+            if (!value) return false;
+            config.serial_log_dir = value;
+        }
         else if (arg == "--help" || arg == "-h") {
             return false;
         }
@@ -198,15 +262,15 @@ bool parse_args(int argc, char** argv, AppConfig& config)
 orcaSDK::OrcaError configure_motor(orcaSDK::Actuator& actuator, uint16_t damping)
 {
     auto error = actuator.set_damper(damping);
-    if (error) return error;
+    if (error) return add_config_step_context("set_damper", error);
 
     error = actuator.enable_haptic_effects(kDamperEffectBit);
-    if (error) return error;
+    if (error) return add_config_step_context("enable_haptic_effects", error);
 
     actuator.update_haptic_stream_effects(kDamperEffectBit);
 
     error = actuator.set_mode(orcaSDK::HapticMode);
-    if (error) return error;
+    if (error) return add_config_step_context("set_mode(HapticMode)", error);
 
     actuator.enable_stream();
     return {false, ""};
@@ -219,22 +283,39 @@ void run_motor_worker(
     uint16_t damping,
     int open_retry_ms,
     int configure_retry_ms,
-    int health_check_ms)
+    int health_check_ms,
+    std::string serial_log_dir)
 {
     const std::string label = motor_config.device + " (addr=" + std::to_string(motor_config.modbus_address) + ")";
     constexpr int kRetryLogIntervalMs = 2000;
+    constexpr int kStatusLogIntervalMs = 3000;
 
     orcaSDK::Actuator actuator(label.c_str(), motor_config.modbus_address);
+
+    const std::string serial_log_path = make_serial_log_path(serial_log_dir, motor_config);
+    if (!serial_log_path.empty()) {
+        const auto log_error = actuator.begin_serial_logging(serial_log_path);
+        if (log_error) {
+            log_line("[WARN] Raw serial logging disabled for " + label + ". Error: " + log_error.what());
+        }
+        else {
+            log_line("[INFO] Raw serial log for " + label + " => " + serial_log_path);
+        }
+    }
 
     bool port_open = false;
     bool haptics_configured = false;
     bool waiting_for_port_logged = false;
     bool waiting_for_haptics_logged = false;
+    MotorRunState state = MotorRunState::WaitingForSerial;
     auto next_open_attempt = std::chrono::steady_clock::now();
     auto next_config_attempt = std::chrono::steady_clock::now();
     auto next_health_check = std::chrono::steady_clock::now();
     auto next_open_retry_log = std::chrono::steady_clock::now();
     auto next_config_retry_log = std::chrono::steady_clock::now();
+    auto next_status_log = std::chrono::steady_clock::now();
+
+    log_line("[STATUS] " + label + " => " + motor_state_to_string(state));
 
     while (g_should_run.load()) {
         const auto now = std::chrono::steady_clock::now();
@@ -253,6 +334,7 @@ void run_motor_worker(
 
             port_open = true;
             haptics_configured = false;
+            state = MotorRunState::WaitingForHaptics;
             next_config_attempt = now;
             waiting_for_haptics_logged = false;
 
@@ -263,6 +345,7 @@ void run_motor_worker(
                 log_line("[INFO] Port opened for " + label);
             }
             waiting_for_port_logged = false;
+            log_line("[STATUS] " + label + " => " + motor_state_to_string(state));
         }
 
         if (port_open && !haptics_configured && now >= next_config_attempt) {
@@ -279,16 +362,20 @@ void run_motor_worker(
                     actuator.close_serial_port();
                     port_open = false;
                     haptics_configured = false;
+                    state = MotorRunState::WaitingForSerial;
                     next_open_attempt = now + std::chrono::milliseconds(open_retry_ms);
                     waiting_for_port_logged = false;
+                    log_line("[STATUS] " + label + " => " + motor_state_to_string(state));
                 }
                 continue;
             }
 
             haptics_configured = true;
+            state = MotorRunState::HapticsActive;
             next_health_check = now + std::chrono::milliseconds(health_check_ms);
             waiting_for_haptics_logged = false;
             log_line("[INFO] Configured " + label + " in haptics mode with damping=" + std::to_string(damping));
+            log_line("[STATUS] " + label + " => " + motor_state_to_string(state));
         }
 
         if (port_open) {
@@ -302,22 +389,32 @@ void run_motor_worker(
             if (mode.error) {
                 log_line("[WARN] " + label + " lost communication while running; switching to retry mode. Error: " + mode.error.what());
                 haptics_configured = false;
+                state = MotorRunState::WaitingForHaptics;
                 waiting_for_haptics_logged = false;
                 next_config_attempt = now;
 
                 if (should_reopen_port(mode.error)) {
                     actuator.close_serial_port();
                     port_open = false;
+                    state = MotorRunState::WaitingForSerial;
                     next_open_attempt = now + std::chrono::milliseconds(open_retry_ms);
                     waiting_for_port_logged = false;
                 }
+                log_line("[STATUS] " + label + " => " + motor_state_to_string(state));
                 continue;
             }
 
             if (mode.value != orcaSDK::HapticMode) {
                 haptics_configured = false;
+                state = MotorRunState::WaitingForHaptics;
                 next_config_attempt = now;
+                log_line("[STATUS] " + label + " => " + motor_state_to_string(state));
             }
+        }
+
+        if (now >= next_status_log) {
+            next_status_log = now + std::chrono::milliseconds(kStatusLogIntervalMs);
+            log_line("[STATUS] " + label + " => " + motor_state_to_string(state));
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -342,6 +439,15 @@ int main(int argc, char** argv)
     std::signal(SIGTERM, signal_handler);
 
     log_line("[INFO] Starting ORCA haptics daemon for " + std::to_string(config.motors.size()) + " device(s)");
+    log_line("[INFO] Options: baud=" + std::to_string(config.baud_rate)
+        + " interframe-us=" + std::to_string(config.interframe_delay_us)
+        + " damping=" + std::to_string(config.damping)
+        + " open-retry-ms=" + std::to_string(config.open_retry_ms)
+        + " configure-retry-ms=" + std::to_string(config.configure_retry_ms)
+        + " health-check-ms=" + std::to_string(config.health_check_ms));
+    if (!config.serial_log_dir.empty()) {
+        log_line("[INFO] Raw serial logs directory: " + config.serial_log_dir);
+    }
 
     std::vector<std::thread> workers;
     workers.reserve(config.motors.size());
@@ -355,7 +461,8 @@ int main(int argc, char** argv)
             config.damping,
             config.open_retry_ms,
             config.configure_retry_ms,
-            config.health_check_ms);
+            config.health_check_ms,
+            config.serial_log_dir);
     }
 
     for (auto& worker : workers) {
